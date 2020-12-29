@@ -13,58 +13,18 @@
 #include <ch554.h>
 #include <debug.h>
 
-#ifndef SDCC
-
-#define __using(x)
-#define __code
-#define __interrupt(x)
-#define __xdata
-#define __idata
-#define __data
-#define __used
-
-#endif //SDCC
-
-#ifndef FREQ_SYS
-#define FREQ_SYS 24000000
-#endif
-
-#define BUFSIZE         8
-#define SAMPLE_RATE_DIV 4
-
-extern uint8_t sinewave_tbl[64];
-
-static inline uint8_t sin_8bit(uint8_t t) {
-    if (t < 64u) return sinewave_tbl[t];
-    if (t < 128u) return sinewave_tbl[127u-t];
-    if (t < 192u) return 255u - sinewave_tbl[t-128u];
-    return 255 - sinewave_tbl[255u-t];
-}
-
-static inline uint16_t freq_2_acc(uint16_t f) {
-    uint16_t t = (FREQ_SYS / 256 / SAMPLE_RATE_DIV) / f;
-    return 65535 / t;
-} 
-
-typedef struct {
-    uint16_t phase; // 0 - 255
-    uint16_t freq;  // phase_acc = freq
-    uint8_t vol;
-} osc_t;
-
-// chan 0: square wave
-// chan 1: saw wave
-// chan 2: sine wave
-// chan 3: noise wave
-
-osc_t channel[4];
-volatile uint16_t jiffies = 0;
-
+#include "osc.h"
+#include "time.h"
+#include "song.h"
 
 volatile uint8_t snd_buf[BUFSIZE];
 volatile uint8_t snd_in = 0;
 volatile uint8_t snd_out = 0;
 volatile uint8_t snd_size = 0;
+
+volatile uint8_t led_pwm_cnt;
+
+volatile uint8_t led_pwm_set[4];
 
 // freq = 16_000_000 / 256 ~= 62.5 kHz
 void PWM_ISR(void) __interrupt ( INT_NO_PWMX ) __using (1) {
@@ -81,145 +41,7 @@ void PWM_ISR(void) __interrupt ( INT_NO_PWMX ) __using (1) {
     count %= SAMPLE_RATE_DIV;
 }
 
-static inline uint8_t rand8() {
-    static uint8_t rnd = 0x8B;
-    // rnd = rnd * 5 + 17;
-    rnd = (rnd << 2) + rnd + 17;
-    return rnd;
-}
-
-/*
-static int func (int8_t a) {
-    static int16_t s = 12345;
-
-    s += a;
-    return s;    
-}
-
-static void func (uint8_t __code *p) {
-    while (*p) P1 = *(p ++);
-}
-*/
-
-
-
-uint8_t sound_mix () __using (2) {
-    int16_t sample = 0;
-    uint8_t a, b, c;
-
-    // square wave
-    b = channel[0].vol;
-
-    if (b) {
-        channel[0].phase += channel[0].freq;
-        a = channel[0].phase >> 8;
-        if (a & 0x80)
-            sample += (uint8_t)(channel[0].vol >> 1u);
-        else
-            sample -= (uint8_t)(channel[0].vol >> 1u);
-    }
-
-    // saw wave
-
-#if SDCC
-    __asm 
-    mov a,(_channel + 9) ; acc = channel[1].vol
-    jz __mix_saw_end
-
-    ; channel[1].phase += channel[1].freq;
-
-    ; phase _channel + 5
-    ; freq _channel + 7
-    ; vol _channel + 9
-	mov	a,(_channel + 0x0007)
-	add	a,(_channel + 0x0005)
-	mov	(_channel + 0x0005),a
-	mov	a,((_channel + 0x0007) + 1)
-	addc	a,((_channel + 0x0005) + 1)
-	mov	((_channel + 0x0005) + 1),a
-
-    ; now a == channel[1].phase >> 8
-
-    mov b,(_channel + 9) ; b = channel[1].vol
-    mul ab
-
-    ; sample += ((vol * (phase / 255)) /255) - (vol/2)
-    mov a,(_channel + 9) ; acc = vol
-    clr c
-    rrc a ; a = vol / 2
-    xch a,b ; b = vol /2, a = (vol * (phase >> 8)) >> 8
-    clr c
-    subb a,b ; a = a - b, a is a int8_t
-
-    ; sample -> r6 : r7
-
-    jc __mix_a_is_neg
-    add a,r6
-    mov r6,a
-    clr a
-    addc a,r7
-    mov r7,a
-    sjmp __mix_saw_end
-    __mix_a_is_neg:
-    add a,r6
-    mov r6,a
-    mov a,#0xFF
-    addc a,r7
-    mov r7,a
-
-    __mix_saw_end:
-    __endasm;
-
-#else
-
-    b = channel[1].vol;
-
-    if (b) {
-        channel[1].phase += channel[1].freq;
-        a = channel[1].phase >> 8;
-        if (a & 0x80)
-            sample += (uint8_t)(channel[1].vol >> 1u);
-        else
-            sample -= (uint8_t)(channel[1].vol >> 1u);
-    }
-
-#endif
-
-    // (channel + 0x000a) = channel[2].phase
-    // (channel + 0x000c) = channel[2].freq
-    // (channel + 0x000e) = channel[2].vol
-
-    // sine wave
-    b = channel[2].vol;
-    if (b) {
-        channel[2].phase += channel[2].freq;
-        a = channel[2].phase >> 8;
-
-        c = sin_8bit(a);
-        sample += (int8_t)(((uint16_t)c * (uint8_t)b) >> 8u) - (b >> 1);
-    }
-
-    // noise
-    b = channel[3].vol;
-    if (b) {
-        channel[3].phase += channel[3].freq;
-
-        a = channel[3].phase >> 8;
-
-        c = rand8() % b;
-        sample += (int8_t)c - (b >> 1);
-    }
-
-    sample += 0xFF;
-    if (sample > 0xFF) 
-        return 0xFF;
-    else if (sample < 0)
-        return 0;
-    else
-        return sample & 0xFF;
-}
-
-void background_task () {
+void task_mix () {
     while (snd_size < BUFSIZE) {
         snd_buf[snd_in++] = sound_mix();
         snd_in %= BUFSIZE;
@@ -228,18 +50,73 @@ void background_task () {
     }
 }
 
+static const __code uint8_t led_pwm_tbl[] = {
+    32,35,38,41,44,47,50,52,55,57,59,60,
+    62,63,63,64,64,64,63,63,62,60,59,57,
+    55,52,50,47,44,41,38,35,32,29,26,23,
+    20,17,14,12,9,7,5,4,2,1,1,0,0,0,1,1,
+    2,4,5,7,9,12,14,17,20,23,26,29
+};
+
+void task_led () {
+    static time_t next_update = 0;
+    if (time_after(jiffies, next_update)) {
+        uint8_t tbl_idx = (jiffies >> 5) % 64;
+
+        led_pwm_set[0] = led_pwm_tbl[tbl_idx];
+        led_pwm_set[1] = led_pwm_tbl[(tbl_idx + 16) % 64];
+        led_pwm_set[2] = led_pwm_tbl[(tbl_idx + 32) % 64];
+        led_pwm_set[3] = led_pwm_tbl[(tbl_idx + 48) % 64];
+
+        next_update = jiffies + 10;
+    }
+}
 
 static inline void timer0_reload () {
-    TH0 = (65535 - (FREQ_SYS / 12 / 1000)) / 256;
-    TL0 = (65535 - (FREQ_SYS / 12 / 1000)) % 256;
+    TH0 = (65535 - (FREQ_SYS / 12 / 8000)) / 256;
+    TL0 = (65535 - (FREQ_SYS / 12 / 8000)) % 256;
 }
+
+/*
+void TMR1_ISR (void) __interrupt ( INT_NO_TMR1 ) {
+    // All LED off
+    P1 = 1;
+    P3 = 1;
+
+    if (led_pwm_set[0] > led_pwm_cnt) {
+        LED1 = 0;
+        LED5 = 0;
+        LED9 = 0;
+    }
+    if (led_pwm_set[1] > led_pwm_cnt) {
+        LED2 = 0;
+        LED6 = 0;
+        LED10 = 0;
+    }
+    if (led_pwm_set[2] > led_pwm_cnt) {
+        LED3 = 0;
+        LED7 = 0;
+        LED11 = 0;
+    }
+    if (led_pwm_set[3] > led_pwm_cnt) {
+        LED4 = 0;
+        LED8 = 0;
+        LED12 = 0;
+    }
+
+    led_pwm_cnt ++;
+    led_pwm_cnt %= 32;
+}
+*/
 
 void TMR_1ms_ISR(void) __interrupt ( INT_NO_TMR0 ) {
     //reload
     timer0_reload();
+    static uint8_t cnt = 0;
+    uint8_t pwm_cnt;
 
 // assmembly manually
-#ifdef SDCC
+#ifdef MS_DEBUG
     __asm
         mov a,_jiffies
         inc a
@@ -253,25 +130,60 @@ void TMR_1ms_ISR(void) __interrupt ( INT_NO_TMR0 ) {
         0002$:
     __endasm;
 #else
-    jiffies ++;
+    if (cnt % 8 == 0) {
+        jiffies ++;
+    }
+
+    //P1 = 1;
+    //P3 = 1;
+
+    LED1 = 1;
+    LED2 = 1;
+    LED3 = 1;
+    LED4 = 1;
+    LED5 = 1;
+    LED6 = 1;
+    LED7 = 1;
+    LED8 = 1;
+    LED9 = 1;
+    LED10 = 1;
+    LED11 = 1;
+    LED12 = 1;
+
+    pwm_cnt = cnt % 32;
+    if (pwm_cnt > led_pwm_set[0]){
+        LED1 = 0;
+        LED5 = 0;
+        LED9 = 0;
+    }
+    if (pwm_cnt > led_pwm_set[1]){
+        LED2 = 0;
+        LED6 = 0;
+        LED10 = 0;
+    }
+    if (pwm_cnt > led_pwm_set[2]){
+        LED3 = 0;
+        LED7 = 0;
+        LED11 = 0;
+    }
+    if (pwm_cnt > led_pwm_set[3]){
+        LED4 = 0;
+        LED8 = 0;
+        LED12 = 0;
+    }
+
+    cnt ++;
+
+    /*
     if (jiffies & 0x80)
         TIN2 = 1;
     else
         TIN2 = 0;
+    */
 #endif
 }
 
-#define time_after(unknown, known) ((int16_t)(known) - (int16_t)(unknown) < 0)
-#define time_before(unknown, known) ((int16_t)(unknown) - (int16_t)(known) <= 0)
-#define time_after_eq(unknown, known) ((int16_t)(unknown) - (int16_t)(known) >= 0)
-#define time_before_eq(unknown, known) ((int16_t)(known) - (int16_t)(unknown) >= 0)
 
-void sleep_ms(uint16_t timeout) {
-    timeout += jiffies;
-    while (time_before(jiffies, timeout)) {
-        background_task();
-    }
-}
 
 void init_channel (void) {
     int i;
@@ -281,6 +193,42 @@ void init_channel (void) {
         channel[i].vol = 0;
     }
 }
+// duration: x10ms
+void play_note(uint8_t note, uint8_t duration) {
+    channel[0].freq = octave_tbl[note];
+    channel[0].vol = 0;
+    uint8_t i;
+    uint8_t t;
+    uint8_t s;
+
+    // 20ms Attack
+    for (i = 1; i <= 5; ++ i) {
+        channel[0].vol = i * 52;
+        sleep_ms(4);
+    }
+
+    // 80ms Sustain
+    for (i = 0; i < 16; ++ i) {
+        channel[0].vol -= 2;
+        sleep_ms(5);
+    }
+
+    // Remain Release
+    s = duration - 10;
+    t = channel[0].vol / s;
+    for (i = 0; i < s / 4; ++ i) {
+        channel[0].vol -= 3 * t;
+        sleep_ms(10);
+    }
+    for (; i < s; ++ i) {
+        if (channel[0].vol > t/3)
+            channel[0].vol -= t/3;
+        else
+            channel[0].vol = 0;
+        sleep_ms(10);
+    }
+    channel[0].vol = 0;
+}
 
 void main () {
     CfgFsys( );                                                           //CH559时钟选择配置
@@ -288,49 +236,138 @@ void main () {
 
     init_channel();
 
+    // Piezo Buzzer
     P3_DIR_PU |= 1 << 4;
     P3_MOD_OC &= ~ (1 << 4);
 
+    P3 = 0;
+    P1 = 0;
+
     // PWM1 PED
-    P1_DIR_PU |= 1 << 5 | 1 << 4;
-    P1_MOD_OC &= ~ (1 << 5 | 1 << 4);
+    //P1_DIR_PU |= 1 << 5 | 1 << 4;
+    //P1_MOD_OC &= ~ (1 << 5 | 1 << 4);
 
     PWM_CK_SE = 1;
     PWM_CTRL |= bPWM_CLR_ALL;
     PWM_CTRL &= ~bPWM_CLR_ALL;
 
     PWM_CTRL |= bPWM2_OUT_EN 
-                | bPWM1_OUT_EN
+//                | bPWM1_OUT_EN
                 | bPWM_IE_END
                 | bPWM_IF_END;
 
     PWM_DATA2 = 127;
 
-    TMOD = 0x01; // Timer 0 mode 1
+    IP_EX = bIP_PWMX;
+
+    //TMOD = bT0_M0 | bT1_M1; // Timer 0 mode 1, Timer 1 mode 2
+    TMOD = 0x01;
 
     timer0_reload();
 
+    // timer1, 256 div, 7812.5 Hz
+    // TH1 = 0x01;
+    // TL1 = 0x01;
+
     ET0 = 1;
     TR0 = 1;
+
+    //ET1 = 1;
+    //TR1 = 1;
 
     IE_PWMX = 1;
     EA = 1;
 
 
-    channel[0].freq = freq_2_acc(1000);
-    channel[0].vol = 30;
-    channel[1].vol = 10;
-    channel[2].vol = 10;
-    channel[3].vol = 10;
+    /*
+    CHAN_SINE.freq = freq_2_acc(1000);
+    CHAN_SINE.vol = 30;
 
     while (1) {
-        channel[2].freq = freq_2_acc(400);
+        CHAN_SAW.freq = freq_2_acc(400);
+        CHAN_SQUARE.freq = freq_2_acc(660);
         uint8_t i = 0;
         for (; i < 10; ++ i) {
-            channel[2].vol = i * i;
+            uint8_t v = i * i;
+            CHAN_SAW.vol = v;
+            CHAN_SQUARE.vol = 100 - v;
             sleep_ms(50);
         }
+
+        CHAN_SAW.vol = 0;
+        CHAN_SQUARE.vol = 0;
         sleep_ms(800);
         //volume = (count_ms % 256) >> 2;
     }
+    */
+
+#define BEAT (60000/180)
+#define DUR (BEAT/10)
+#define DUR_2 (BEAT/2)/10
+#define BLANK 0
+
+    while(1) {
+        play_note(G4, DUR); sleep_ms(BLANK);
+
+        play_note(C5, DUR); sleep_ms(BLANK);
+        play_note(C5, DUR_2); play_note(D5, DUR_2);
+        play_note(C5, DUR_2); play_note(B5, DUR_2);
+
+        play_note(A5, DUR); sleep_ms(BLANK);
+        play_note(A5, DUR); sleep_ms(BLANK);
+        play_note(A5, DUR); sleep_ms(BLANK);
+
+        play_note(D5, DUR); sleep_ms(BLANK);
+        play_note(D5, DUR_2); play_note(E5, DUR_2);
+        play_note(D5, DUR_2); play_note(C5, DUR_2);
+
+        play_note(B5, DUR); sleep_ms(BLANK);
+        play_note(G4, DUR); sleep_ms(BLANK);
+        play_note(G4, DUR); sleep_ms(BLANK);
+
+        play_note(E5, DUR); sleep_ms(BLANK);
+        play_note(E5, DUR_2); play_note(F5, DUR_2);
+        play_note(E5, DUR_2); play_note(D5, DUR_2);
+
+        play_note(C5, DUR); sleep_ms(BLANK);
+        play_note(A5, DUR); sleep_ms(BLANK);
+        play_note(G4, DUR_2); play_note(G4, DUR_2);
+
+        play_note(A5, DUR); sleep_ms(BLANK);
+        play_note(D5, DUR); sleep_ms(BLANK);
+        play_note(B5, DUR); sleep_ms(BLANK);
+
+        play_note(C5, BEAT/10);
+        play_note(G4, DUR); sleep_ms(BLANK);
+
+        play_note(C5, DUR); sleep_ms(BLANK);
+        play_note(C5, DUR); sleep_ms(BLANK);
+        play_note(C5, DUR); sleep_ms(BLANK);
+
+        play_note(B5, BEAT/10);
+        play_note(B5, DUR); sleep_ms(BLANK);
+
+        play_note(C5, DUR); sleep_ms(BLANK);
+        play_note(B5, DUR); sleep_ms(BLANK);
+        play_note(A5, DUR); sleep_ms(BLANK);
+
+        play_note(G4, BEAT/10);
+        play_note(D5, DUR); sleep_ms(BLANK);
+
+        play_note(E5, DUR); sleep_ms(BLANK);
+        play_note(D5, DUR); sleep_ms(BLANK);
+        play_note(C5, DUR); sleep_ms(BLANK);
+
+        play_note(G5, DUR); sleep_ms(BLANK);
+        play_note(G4, DUR); sleep_ms(BLANK);
+        play_note(G4, DUR_2); play_note(G4, DUR_2);
+
+        play_note(A5, DUR); sleep_ms(BLANK);
+        play_note(D5, DUR); sleep_ms(BLANK);
+        play_note(B5, DUR); sleep_ms(BLANK);
+
+        play_note(C5, 3*BEAT/10);
+
+        sleep_ms(3000);
+    };
 }

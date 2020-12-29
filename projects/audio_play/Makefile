@@ -13,6 +13,9 @@ FREQ_SYS = 24000000
 
 C_FILES = \
 	tbl.c \
+	osc.c \
+	track.c \
+	time.c \
 	main.c \
 	../../include/debug.c
 
